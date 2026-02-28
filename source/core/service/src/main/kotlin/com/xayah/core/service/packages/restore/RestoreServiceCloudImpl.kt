@@ -18,7 +18,12 @@ import com.xayah.core.service.util.CommonBackupUtil
 import com.xayah.core.service.util.PackagesRestoreUtil
 import com.xayah.core.util.PathUtil
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import javax.inject.Inject
+import kotlin.coroutines.coroutineContext
 
 @AndroidEntryPoint
 internal class RestoreServiceCloudImpl @Inject constructor() : AbstractRestoreService() {
@@ -69,16 +74,37 @@ internal class RestoreServiceCloudImpl @Inject constructor() : AbstractRestoreSe
 
     override suspend fun restore(type: DataType, userId: Int, p: PackageEntity, t: TaskDetailPackageEntity, srcDir: String) {
         val remoteAppDir = getRemoteAppDir(p.archivesRelativeDir)
-        mPackagesRestoreUtil.download(client = mClient, p = p, t = t, dataType = type, srcDir = remoteAppDir, dstDir = srcDir) { mP, mT, _, mPath ->
-            if (type == DataType.PACKAGE_APK) {
-                mPackagesRestoreUtil.restoreApk(userId = userId, p = mP, t = mT, srcDir = mPath)
-            } else {
-                mPackagesRestoreUtil.restoreData(userId = userId, p = mP, t = mT, dataType = type, srcDir = mPath)
+        enqueueTransfer {
+            mPackagesRestoreUtil.download(client = mClient, p = p, t = t, dataType = type, srcDir = remoteAppDir, dstDir = srcDir) { mP, mT, _, mPath ->
+                if (type == DataType.PACKAGE_APK) {
+                    mPackagesRestoreUtil.restoreApk(userId = userId, p = mP, t = mT, srcDir = mPath)
+                } else {
+                    mPackagesRestoreUtil.restoreData(userId = userId, p = mP, t = mT, dataType = type, srcDir = mPath)
+                }
             }
+            t.update(dataType = type, progress = 1f)
+            t.update(processingIndex = t.processingIndex + 1)
         }
+        return
 
-        t.update(dataType = type, progress = 1f)
-        t.update(processingIndex = t.processingIndex + 1)
+    }
+
+    private suspend fun enqueueTransfer(block: suspend () -> Unit) {
+        val job = CoroutineScope(coroutineContext).launch {
+            block()
+        }
+        mTransferJobs.add(job)
+    }
+
+    private suspend fun awaitPendingTransfers() {
+        val pendingJobs = mTransferJobs.filter { it.isActive }
+        pendingJobs.joinAll()
+    }
+
+    override suspend fun clear() {
+        awaitPendingTransfers()
+        mRootService.deleteRecursively(mRootDir)
+        mClient.disconnect()
     }
 
     @Inject
@@ -102,4 +128,5 @@ internal class RestoreServiceCloudImpl @Inject constructor() : AbstractRestoreSe
     private lateinit var mRemotePath: String
     private lateinit var mRemoteAppsDir: String
     private lateinit var mRemoteConfigsDir: String
+    private val mTransferJobs: MutableList<Job> = mutableListOf()
 }

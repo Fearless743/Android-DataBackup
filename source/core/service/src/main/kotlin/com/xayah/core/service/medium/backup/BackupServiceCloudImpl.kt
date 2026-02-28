@@ -20,7 +20,9 @@ import com.xayah.core.service.util.MediumBackupUtil
 import com.xayah.core.util.PathUtil
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import kotlin.coroutines.coroutineContext
@@ -84,10 +86,27 @@ internal class BackupServiceCloudImpl @Inject constructor() : AbstractBackupServ
 
         val result = mMediumBackupUtil.backupMedia(m = m, t = t, r = r, dstDir = dstDir)
         if (result.isSuccess && t.mediaInfo.state != OperationState.SKIP) {
-            mMediumBackupUtil.upload(client = mClient, m = m, t = t, srcDir = dstDir, dstDir = remoteFileDir)
+            enqueueTransfer {
+                mMediumBackupUtil.upload(client = mClient, m = m, t = t, srcDir = dstDir, dstDir = remoteFileDir)
+                t.update(progress = 1f)
+                t.update(processingIndex = t.processingIndex + 1)
+            }
+            return
         }
         t.update(progress = 1f)
         t.update(processingIndex = t.processingIndex + 1)
+    }
+
+    private suspend fun enqueueTransfer(block: suspend () -> Unit) {
+        val job = CoroutineScope(coroutineContext).launch {
+            block()
+        }
+        mTransferJobs.add(job)
+    }
+
+    private suspend fun awaitPendingTransfers() {
+        val pendingJobs = mTransferJobs.filter { it.isActive }
+        pendingJobs.joinAll()
     }
 
     override suspend fun onConfigSaved(path: String, archivesRelativeDir: String) {
@@ -131,6 +150,7 @@ internal class BackupServiceCloudImpl @Inject constructor() : AbstractBackupServ
     }
 
     override suspend fun clear() {
+        awaitPendingTransfers()
         mRootService.deleteRecursively(mRootDir)
         mClient.disconnect()
     }
@@ -156,4 +176,5 @@ internal class BackupServiceCloudImpl @Inject constructor() : AbstractBackupServ
     private lateinit var mRemotePath: String
     private lateinit var mRemoteFilesDir: String
     private lateinit var mRemoteConfigsDir: String
+    private val mTransferJobs: MutableList<Job> = mutableListOf()
 }

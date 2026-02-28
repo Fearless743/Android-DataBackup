@@ -19,7 +19,12 @@ import com.xayah.core.service.util.CommonBackupUtil
 import com.xayah.core.service.util.MediumRestoreUtil
 import com.xayah.core.util.PathUtil
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import javax.inject.Inject
+import kotlin.coroutines.coroutineContext
 
 @AndroidEntryPoint
 internal class RestoreServiceCloudImpl @Inject constructor() : AbstractRestoreService() {
@@ -73,13 +78,36 @@ internal class RestoreServiceCloudImpl @Inject constructor() : AbstractRestoreSe
         if (m.path.isEmpty()) {
             t.update(state = OperationState.ERROR, log = "Path is empty.")
         } else {
-            mMediumRestoreUtil.download(client = mClient, m = m, t = t, dataType = DataType.PACKAGE_MEDIA, srcDir = remoteFileDir, dstDir = srcDir) { mM, mT, mPath ->
-                mMediumRestoreUtil.restoreMedia(m = mM, t = mT, srcDir = mPath)
+            enqueueTransfer {
+                mMediumRestoreUtil.download(client = mClient, m = m, t = t, dataType = DataType.PACKAGE_MEDIA, srcDir = remoteFileDir, dstDir = srcDir) { mM, mT, mPath ->
+                    mMediumRestoreUtil.restoreMedia(m = mM, t = mT, srcDir = mPath)
+                }
+                t.update(progress = 1f)
+                t.update(processingIndex = t.processingIndex + 1)
             }
+            return
         }
 
         t.update(progress = 1f)
         t.update(processingIndex = t.processingIndex + 1)
+    }
+
+    private suspend fun enqueueTransfer(block: suspend () -> Unit) {
+        val job = CoroutineScope(coroutineContext).launch {
+            block()
+        }
+        mTransferJobs.add(job)
+    }
+
+    private suspend fun awaitPendingTransfers() {
+        val pendingJobs = mTransferJobs.filter { it.isActive }
+        pendingJobs.joinAll()
+    }
+
+    override suspend fun clear() {
+        awaitPendingTransfers()
+        mRootService.deleteRecursively(mRootDir)
+        mClient.disconnect()
     }
 
     @Inject
@@ -102,4 +130,5 @@ internal class RestoreServiceCloudImpl @Inject constructor() : AbstractRestoreSe
     private lateinit var mClient: CloudClient
     private lateinit var mRemotePath: String
     private lateinit var mRemoteFilesDir: String
+    private val mTransferJobs: MutableList<Job> = mutableListOf()
 }

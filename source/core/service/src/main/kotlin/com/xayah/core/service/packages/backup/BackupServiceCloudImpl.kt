@@ -22,7 +22,9 @@ import com.xayah.core.service.util.PackagesBackupUtil
 import com.xayah.core.util.PathUtil
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import kotlin.coroutines.coroutineContext
@@ -89,10 +91,27 @@ internal class BackupServiceCloudImpl @Inject constructor() : AbstractBackupServ
             mPackagesBackupUtil.backupData(p = p, t = t, r = r, dataType = type, dstDir = dstDir)
         }
         if (result.isSuccess && t.get(type).state != OperationState.SKIP) {
-            mPackagesBackupUtil.upload(client = mClient, p = p, t = t, dataType = type, srcDir = dstDir, dstDir = remoteAppDir)
+            enqueueTransfer {
+                mPackagesBackupUtil.upload(client = mClient, p = p, t = t, dataType = type, srcDir = dstDir, dstDir = remoteAppDir)
+                t.update(dataType = type, progress = 1f)
+                t.update(processingIndex = t.processingIndex + 1)
+            }
+            return
         }
         t.update(dataType = type, progress = 1f)
         t.update(processingIndex = t.processingIndex + 1)
+    }
+
+    private suspend fun enqueueTransfer(block: suspend () -> Unit) {
+        val job = CoroutineScope(coroutineContext).launch {
+            block()
+        }
+        mTransferJobs.add(job)
+    }
+
+    private suspend fun awaitPendingTransfers() {
+        val pendingJobs = mTransferJobs.filter { it.isActive }
+        pendingJobs.joinAll()
     }
 
     override suspend fun onConfigSaved(path: String, archivesRelativeDir: String) {
@@ -154,6 +173,7 @@ internal class BackupServiceCloudImpl @Inject constructor() : AbstractBackupServ
     }
 
     override suspend fun clear() {
+        awaitPendingTransfers()
         mRootService.deleteRecursively(mRootDir)
         mClient.disconnect()
     }
@@ -179,4 +199,5 @@ internal class BackupServiceCloudImpl @Inject constructor() : AbstractBackupServ
     private lateinit var mRemotePath: String
     private lateinit var mRemoteAppsDir: String
     private lateinit var mRemoteConfigsDir: String
+    private val mTransferJobs: MutableList<Job> = mutableListOf()
 }
